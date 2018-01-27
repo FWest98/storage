@@ -33,6 +33,7 @@ var rancherDrivers = map[string]bool{
 	"rancher-nfs":      true,
 	"rancher-secrets":  true,
 	"rancher-longhorn": true,
+	"rancher-sshfs":    true,
 }
 
 type RancherState struct {

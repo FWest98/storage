@@ -1,0 +1,246 @@
+#!/bin/bash
+set -x
+
+if [ -e "$(dirname $0)/common.sh" ]; then
+    source $(dirname $0)/common.sh
+elif [ -e "$(dirname $0)/../common/common.sh" ]; then
+    source $(dirname $0)/../common/common.sh
+fi
+
+# Function mounts an sshfs according to data given
+mount_sshfs() {
+    local host=$1
+    local user=$2
+    local pwd=$3
+    local externalDir=$4
+    local mountDir=$5
+    local opts=$6
+    local error
+
+    if [ "$(ismounted $mountDir)" == 0]; then
+        mkdir -p $mountDir
+
+        # Build mount command
+        local cmd="sshfs"
+        cmd="$cmd $user@$host:$externalDir"
+        cmd="$cmd $mountDir"
+
+        if [ ! -z "$opts" ]; then
+            local IFS=';' read -ra OPTSARR <<< "$opts"
+            for opt in "${OPTSARR[@]}"; do
+                cmd="$cmd -o $opt"
+            done
+        fi
+
+        if [ ! -z "$pwd" ]; then
+            cmd="$cmd -o password=$pwd"
+        fi
+
+        # Execute mount
+        error=`$cmd 2>&1`
+        if [ $? -ne 0]; then
+            print_error "Failed $cmd: $error"
+        fi
+    fi
+}
+
+# Function that mounts the base path of the volume
+mount_basepath() {
+    # Base data
+    local host="$SSHFS_HOST"
+    local user="$SSHFS_USER"
+    local pwd="$SSHFS_PWD"
+    local mountDir="$(tmp_dir)"
+    local basePath="$SSHFS_BASEPATH"
+    local opts="$SSHFS_OPTS"
+
+    # One of global variables if overridden: use the specific ones
+    if [ ! -z "${OPTS[host]}" ]; then
+        host="${OPTS[host]}"
+    fi
+
+    if [ ! -z "${OPTS[user]}" ]; then
+        user="${OPTS[user]}"
+    fi
+
+    if [ ! -z "${OPTS[pwd]}" ]; then
+        pwd="${OPTS[pwd]}"
+    fi
+
+    if [ ! -z "${OPTS[basePath]}" ]; then
+        basePath="${OPTS[basePath]}"
+    fi
+
+    if [ ! -z "${OPTS[opts]}" ]; then
+        opts="${OPTS[opts]}"
+    fi
+
+    # If we have a custom directory we will mount that
+    if [ ! -z "${OPTS[path]}"]; then
+        basePath="${OPTS[path]}"
+    fi
+
+    # Create directory inside the basePath to represent this volume
+    mount_sshfs "$host" "$user" "$pwd" "$basePath" "$mountDir" "$opts"
+
+    echo "$mountDir"
+}
+
+# Function unmounts sshfs and cleans up
+unmount_sshfs() {
+    local mountDir=$1
+    local error
+
+    if [ "$(ismounted $mountDir)" == 1 ]; then
+        error=`umount "$mountDir" 2>&1`
+        if [ $? -ne 0 ]; then
+            print_error "Failed umount $mountDir: $error"
+        fi
+    fi
+
+    if [ ! "$(ls -a $mountDir)" ]; then
+        rm -rf "$mountDir"
+    fi
+}
+
+init()
+{
+    print_success
+}
+
+tmp_dir() {
+    echo "/tmp/$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w5 | head -n1)"
+}
+
+# Function gathers info about volume, if there is no specific directory
+# specified in the volume settings, it will make a folder with the
+# name of the volume.
+create()
+{
+    if [ -z "${OPTS[name]}" ]; then
+        print_error "name is required"
+    fi
+
+    # If we have a custom directory we don't need to do more setup
+    if [ ! -z "${OPTS[path]}"]; then
+        print_success
+        exit 0
+    fi
+
+    local name="${OPTS[name]}"
+    local onRemove="$SSHFS_ONREMOVE"
+
+    if [ ! -z "${OPTS[onRemove]}"]; then
+        onRemove="${OPTS[onRemove]}"
+    fi
+
+    mountDir=$(mount_basepath)
+
+    local subDir="$mountDir/$name"
+    local created=0
+
+    if [ ! -d "${subDir}" ]; then
+        mkdir -p "${subDir}"
+        created=1
+    fi
+
+    unmount_sshfs "$mountDir"
+
+    if [ "${created}" == 1 ]; then
+        print_options created true name ${OPTS[name]} onRemove $onRemove
+    else
+        print_success
+    fi
+}
+
+attach() {
+    print_not_supported
+}
+
+# Function that actually mounts the sshfs inside the host
+mountdest() {
+    # Base data
+    local host="$SSHFS_HOST"
+    local user="$SSHFS_USER"
+    local pwd="$SSHFS_PWD"
+    local name="${OPTS[name]}"
+    local mountDir="$MNT_DEST"
+    local basePath="$SSHFS_BASEPATH"
+    local opts="$SSHFS_OPTS"
+
+    # One of global variables if overridden: use the specific ones
+    if [ ! -z "${OPTS[host]}" ]; then
+        host="${OPTS[host]}"
+    fi
+
+    if [ ! -z "${OPTS[user]}" ]; then
+        user="${OPTS[user]}"
+    fi
+
+    if [ ! -z "${OPTS[pwd]}" ]; then
+        pwd="${OPTS[pwd]}"
+    fi
+
+    if [ ! -z "${OPTS[basePath]}" ]; then
+        basePath="${OPTS[basePath]}"
+    fi
+
+    if [ ! -z "${OPTS[opts]}" ]; then
+        opts="${OPTS[opts]}"
+    fi
+
+    local remoteDir="$basePath/$name"
+
+    # If we have a custom directory we will use that one
+    if [ ! -z "${OPTS[path]}"]; then
+        remoteDir="${OPTS[path]}"
+    fi
+
+    # Mount sshfs
+    mount_sshfs "$host" "$user" "$pwd" "$remoteDir" "$mountDir" "$opts"
+    print_success
+}
+
+detach() {
+    print_not_supported
+}
+
+unmount() {
+    unmount_sshfs "$MNT_DEST"
+    print_success
+}
+
+# Function purges the data if necessary
+delete() {
+    local onRemove="$SSHFS_ONREMOVE"
+    local name="${OPTS[name]}"
+
+    if [ ! -z "${OPTS[onRemove]}"]; then
+        onRemove="${OPTS[onRemove]}"
+    fi
+
+    # If retain is set, or custom folder and not explicitly purge
+    if [ "$onRemove" == "retain" ] || ([ ! -z "${OPTS[path]}" ] && [ "$onRemove" != "purge" ]); then
+        log_info $name "Retaining volume"
+        print_success retained
+        exit 0
+    fi
+
+    # Mount base path and remove folder
+    mountDir=$(mount_basepath)
+
+    # If custom folder is set we remove contents
+    if [ ! -z "${OPTS[path]}" ]; then
+        log_info $name "Purging volume (path contents)"
+        rm -rf "$mountDir/*"
+    else
+        log_info $name "Purging volume (subfolder)"
+        rm -rf "$mountDir/$name"
+    fi
+
+    unmount_nfs "$mountDir"
+
+    print_success purged
+}
+
+main "$@"
